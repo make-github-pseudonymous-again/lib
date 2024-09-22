@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/make-github-pseudonymous-again/npm-downloads/internals/arrays"
 	"github.com/make-github-pseudonymous-again/npm-downloads/internals/dependencies"
 	"github.com/make-github-pseudonymous-again/npm-downloads/internals/npm"
 )
@@ -47,7 +46,7 @@ const (
 func args() (int, string, []string) {
 	var period string
 	flag.StringVar(&period, "period", LastDay, "Period to fetch")
-	batch := flag.Int("batch", 100, "Batch size for fetches")
+	batch := flag.Int("batch", 100, "Batch size for DB inserts")
 	flag.Parse()
 	fmt.Printf("Period: %v\n", period)
 	packages := flag.Args()
@@ -67,7 +66,7 @@ func main() {
 	errors := make(chan error)
 
 	requestTime := time.Now()
-	batches := packageDownloadBatches(period, packages)
+	batches := npm.PackageDownloadBatches(period, packages)
 	fetch(&wg, results, errors, batches)
 
 	failures := 0
@@ -159,44 +158,6 @@ func insertRecords(db *sql.DB, batchSize int, pkg npm.SinglePackageResponse, req
 	}
 
 	return nil
-}
-
-func packageDownloadBatches(period string, packageNames []string) []npm.Batch {
-	// NOTE: Partition between scoped and non-scoped packages.
-	var scopedPackages []string
-	var nonScopedPackages []string
-
-	for _, pkg := range packageNames {
-		if npm.IsScopedPackageName(pkg) {
-			scopedPackages = append(scopedPackages, pkg)
-		} else {
-			nonScopedPackages = append(nonScopedPackages, pkg)
-		}
-	}
-
-	// NOTE: Group non-scoped packages into batches of 128.
-	nonScopedBatches := arrays.Chunk(nonScopedPackages, 128)
-
-	// NOTE: Return all batches.
-	var batches []npm.Batch
-	for _, packages := range nonScopedBatches {
-		batch := npm.Batch{
-			Period:   period,
-			Packages: packages,
-		}
-		batches = append(batches, batch)
-
-	}
-	for _, pkg := range scopedPackages {
-		packages := []string{pkg}
-		batch := npm.Batch{
-			Period:   period,
-			Packages: packages,
-		}
-		batches = append(batches, batch)
-	}
-
-	return batches
 }
 
 func fetch(wg *sync.WaitGroup, results chan<- npm.SinglePackageResponse, errors chan<- error, batches []npm.Batch) {
