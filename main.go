@@ -28,8 +28,7 @@ const (
 		excluded.count > downloads.count;
 	`
 
-	ScopedPackagePrefix = "@"
-	DateFormat          = "2006-01-02"
+	DateFormat = "2006-01-02"
 	// TODO: https://api.npmjs.org/versions/{url-encoded-/ package name}/last-week
 	// NOTE: https://github.com/npm/registry/blob/main/docs/download-counts.md#per-version-download-counts
 
@@ -67,8 +66,8 @@ func main() {
 	errors := make(chan error)
 
 	requestTime := time.Now()
-	batches := packageDownloadBatches(packages)
-	fetch(&wg, results, errors, period, batches)
+	batches := packageDownloadBatches(period, packages)
+	fetch(&wg, results, errors, batches)
 
 	failures := 0
 
@@ -161,17 +160,13 @@ func insertRecords(db *sql.DB, batchSize int, pkg npm.SinglePackageResponse, req
 	return nil
 }
 
-func isScopedPackageName(name string) bool {
-	return strings.HasPrefix(name, ScopedPackagePrefix)
-}
-
-func packageDownloadBatches(packageNames []string) [][]string {
+func packageDownloadBatches(period string, packageNames []string) []npm.Batch {
 	// NOTE: Partition between scoped and non-scoped packages.
 	var scopedPackages []string
 	var nonScopedPackages []string
 
 	for _, pkg := range packageNames {
-		if isScopedPackageName(pkg) {
+		if npm.IsScopedPackageName(pkg) {
 			scopedPackages = append(scopedPackages, pkg)
 		} else {
 			nonScopedPackages = append(nonScopedPackages, pkg)
@@ -182,19 +177,31 @@ func packageDownloadBatches(packageNames []string) [][]string {
 	nonScopedBatches := arrays.Chunk(nonScopedPackages, 128)
 
 	// NOTE: Return all batches.
-	batches := nonScopedBatches
+	var batches []npm.Batch
+	for _, packages := range nonScopedBatches {
+		batch := npm.Batch{
+			Period:   period,
+			Packages: packages,
+		}
+		batches = append(batches, batch)
+
+	}
 	for _, pkg := range scopedPackages {
-		scopedBatch := []string{pkg}
-		batches = append(batches, scopedBatch)
+		packages := []string{pkg}
+		batch := npm.Batch{
+			Period:   period,
+			Packages: packages,
+		}
+		batches = append(batches, batch)
 	}
 
 	return batches
 }
 
-func fetch(wg *sync.WaitGroup, results chan<- npm.SinglePackageResponse, errors chan<- error, period string, batches [][]string) {
+func fetch(wg *sync.WaitGroup, results chan<- npm.SinglePackageResponse, errors chan<- error, batches []npm.Batch) {
 	for _, batch := range batches {
 		wg.Add(1)
-		go npm.FetchBatch(wg, results, errors, period, batch)
+		go npm.FetchBatch(wg, results, errors, batch)
 	}
 
 	go func() {

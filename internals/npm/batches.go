@@ -30,56 +30,71 @@ type SinglePackageResponse struct {
 // Struct for a multi-package response
 type MultiPackageResponse map[string]SinglePackageResponse
 
-func FetchBatch(wg *sync.WaitGroup, resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, period string, batch []string) {
-	defer wg.Done()
-	namesJoined := strings.Join(batch, ",")
+type Batch struct {
+	Period   string
+	Packages []string
+}
 
-	url := fmt.Sprintf(
+func url(batch Batch) string {
+	namesJoined := strings.Join(batch.Packages, ",")
+	return fmt.Sprintf(
 		NPM_DOWNLOADS_API_RANGE_ENDPOINT,
 		NPM_DOWNLOADS_API,
-		period,
+		batch.Period,
 		namesJoined,
 	)
+}
 
-	if len(batch) == 1 {
+func FetchBatch(wg *sync.WaitGroup, resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, batch Batch) {
+	defer wg.Done()
+
+	if len(batch.Packages) == 1 {
 		FetchBatchSingle(
 			resultsChan,
 			errorsChan,
-			url,
+			batch,
 		)
 	}
-	if len(batch) >= 2 {
+	if len(batch.Packages) >= 2 {
 		FetchBatchMany(
 			resultsChan,
 			errorsChan,
-			url,
+			batch,
 		)
 	}
 
 }
 
-func FetchBatchSingle(resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, url string) {
-	var object SinglePackageResponse
-	err := http.FetchJSON(url, &object)
+func FetchBatchSingle(resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, batch Batch) {
+	if len(batch.Packages) != 1 {
+		panic("FetchBatchSingle can only handles batches of size == 1")
+	}
+
+	var response SinglePackageResponse
+	err := http.FetchJSON(url(batch), &response)
 
 	if err != nil {
 		errorsChan <- err
 		return
 	}
 
-	resultsChan <- object
+	resultsChan <- response
 }
 
-func FetchBatchMany(resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, url string) {
-	var object MultiPackageResponse
-	err := http.FetchJSON(url, &object)
+func FetchBatchMany(resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, batch Batch) {
+	if len(batch.Packages) < 2 {
+		panic("FetchBatchMany can only handles batches of size >= 1")
+	}
+
+	var responses MultiPackageResponse
+	err := http.FetchJSON(url(batch), &responses)
 
 	if err != nil {
 		errorsChan <- err
 		return
 	}
 
-	for _, singleResp := range object {
-		resultsChan <- singleResp
+	for _, response := range responses {
+		resultsChan <- response
 	}
 }
