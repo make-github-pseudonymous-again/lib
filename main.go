@@ -13,6 +13,8 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/make-github-pseudonymous-again/npm-downloads/internals/arrays"
 )
 
 const (
@@ -39,13 +41,14 @@ const (
 	DateFormat                       = "2006-01-02"
 	NPM_DOWNLOADS_API                = "https://api.npmjs.org"
 	NPM_DOWNLOADS_API_RANGE_ENDPOINT = "%s/downloads/range/%s/%s"
+	// TODO: https://api.npmjs.org/versions/{url-encoded-/ package name}/last-week
+	// NOTE: https://github.com/npm/registry/blob/main/docs/download-counts.md#per-version-download-counts
 
+	// NOTE: Can also have the form YYYY-MM-DD or YYYY-MM-DD:YYYY-MM-DD
 	LastDay   = "last-day"
 	LastWeek  = "last-week"
 	LastMonth = "last-month"
 	LastYear  = "last-year"
-
-// NOTE: Can also have the form YYYY-MM-DD or YYYY-MM-DD:YYYY-MM-DD
 )
 
 const (
@@ -204,11 +207,11 @@ func insertRecords(db *sql.DB, batchSize int, pkg SinglePackageResponse, request
 	WHERE
 		excluded.count > downloads.count;`
 
-	// Create a slice to hold value placeholders and arguments
-	var placeholders []string
-	var args []interface{}
-
 	for i := 0; i < len(pkg.Downloads); i += batchSize {
+		// Create a slice to hold value placeholders and arguments
+		var placeholders []string
+		var args []interface{}
+
 		j := i + batchSize
 		if j > len(pkg.Downloads) {
 			j = len(pkg.Downloads)
@@ -252,7 +255,7 @@ func insertRecords(db *sql.DB, batchSize int, pkg SinglePackageResponse, request
 		// Join the placeholders to create the final query
 		finalQuery := fmt.Sprintf(insertQuery, strings.Join(placeholders, ","))
 
-		fmt.Println("BATCH execute")
+		fmt.Printf("BATCH execute (%v)\n", len(placeholders))
 
 		// Execute the batch insert
 		_, err := db.Exec(finalQuery, args...)
@@ -263,18 +266,6 @@ func insertRecords(db *sql.DB, batchSize int, pkg SinglePackageResponse, request
 	}
 
 	return nil
-}
-
-func chunkArray(array []string, size int) [][]string {
-	var chunks [][]string
-	for i := 0; i < len(array); i += size {
-		end := i + size
-		if end > len(array) {
-			end = len(array)
-		}
-		chunks = append(chunks, array[i:end])
-	}
-	return chunks
 }
 
 func fetch(wg *sync.WaitGroup, resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, period string, packageNames []string) {
@@ -292,7 +283,7 @@ func fetch(wg *sync.WaitGroup, resultsChan chan<- SinglePackageResponse, errorsC
 	}
 
 	// Group non-scoped packages into chunks of 128
-	nonScopedChunks := chunkArray(nonScopedPackages, 128)
+	nonScopedChunks := arrays.Chunk(nonScopedPackages, 128)
 
 	allChunks := nonScopedChunks
 	for _, pkg := range scopedPackages {
