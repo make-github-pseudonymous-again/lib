@@ -44,14 +44,15 @@ const (
 	MultiResponse
 )
 
-func args() (string, []string) {
+func args() (int, string, []string) {
 	var period string
 	flag.StringVar(&period, "period", LastDay, "Period to fetch")
+	batch := flag.Int("batch", 100, "Batch size for fetches")
 	flag.Parse()
 	fmt.Printf("Period: %v\n", period)
 	packages := flag.Args()
 	fmt.Printf("Packages: %v\n", packages)
-	return period, packages
+	return *batch, period, packages
 }
 
 func main() {
@@ -59,7 +60,7 @@ func main() {
 	db := dependencies.Storage()
 	defer db.Close()
 
-	period, packages := args()
+	batch, period, packages := args()
 
 	var wg sync.WaitGroup
 	results := make(chan npm.SinglePackageResponse)
@@ -75,7 +76,7 @@ func main() {
 		select {
 		case result, ok := <-results:
 			if ok {
-				err := insertRecords(db, 100, result, requestTime)
+				err := insertRecords(db, batch, result, requestTime)
 				if err != nil {
 					log.Fatalf("Error inserting record: %v\n", err)
 				}
@@ -84,7 +85,7 @@ func main() {
 			}
 		case err, ok := <-errors:
 			if ok {
-				log.Printf("Error occurred during fetch: %v", err)
+				log.Printf("Error occurred during fetch: %v\n", err)
 				failures += 1
 			} else {
 				errors = nil

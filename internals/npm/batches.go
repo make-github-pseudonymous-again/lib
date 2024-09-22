@@ -1,6 +1,7 @@
 package npm
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ type DailyDownload struct {
 
 // Struct for a single-package response
 type SinglePackageResponse struct {
+	Error     string          `json:"error"`
 	Start     string          `json:"start"`
 	End       string          `json:"end"`
 	Package   string          `json:"package"`
@@ -78,7 +80,11 @@ func FetchBatchSingle(resultsChan chan<- SinglePackageResponse, errorsChan chan<
 		return
 	}
 
-	resultsChan <- response
+	if response.Error != "" {
+		errorsChan <- errors.New(response.Error)
+	} else {
+		resultsChan <- response
+	}
 }
 
 func FetchBatchMany(resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, batch Batch) {
@@ -94,7 +100,11 @@ func FetchBatchMany(resultsChan chan<- SinglePackageResponse, errorsChan chan<- 
 		return
 	}
 
-	for _, response := range responses {
-		resultsChan <- response
+	for key, response := range responses {
+		if response.Package == "" {
+			errorsChan <- fmt.Errorf("package %v not found", key)
+		} else {
+			resultsChan <- response
+		}
 	}
 }
