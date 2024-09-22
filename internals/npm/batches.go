@@ -59,6 +59,7 @@ func FetchBatch(wg *sync.WaitGroup, results chan<- SinglePackageResponse, errors
 			batch,
 		)
 	}
+
 	if len(batch.Packages) >= 2 {
 		FetchBatchMany(
 			results,
@@ -66,7 +67,6 @@ func FetchBatch(wg *sync.WaitGroup, results chan<- SinglePackageResponse, errors
 			batch,
 		)
 	}
-
 }
 
 func FetchBatchSingle(results chan<- SinglePackageResponse, errors chan<- error, batch Batch) {
@@ -129,6 +129,7 @@ func PackageDownloadBatches(period string, packageNames []string) []Batch {
 
 	// NOTE: Return all batches.
 	var batches []Batch
+
 	for _, packages := range nonScopedBatches {
 		batch := Batch{
 			Period:   period,
@@ -137,6 +138,7 @@ func PackageDownloadBatches(period string, packageNames []string) []Batch {
 		batches = append(batches, batch)
 
 	}
+
 	for _, pkg := range scopedPackages {
 		packages := []string{pkg}
 		batch := Batch{

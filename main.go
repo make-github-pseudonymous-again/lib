@@ -55,7 +55,6 @@ func args() (int, string, []string) {
 }
 
 func main() {
-
 	db := dependencies.Storage()
 	defer db.Close()
 
@@ -100,48 +99,55 @@ func main() {
 	fmt.Println("DONE")
 }
 
+func createBatchArgs(requestTime time.Time, name string, batch []npm.DailyDownload) ([]string, []interface{}) {
+	var placeholders []string
+	var args []interface{}
+
+	for k, point := range batch {
+		date, err := time.Parse(DateFormat, point.Day)
+		if err != nil {
+			log.Printf("Error parsing date: %v\n", err)
+		}
+		year := date.Year()
+		month := int(date.Month())
+		day := date.Day()
+		dayOfWeek := int(date.Weekday())
+
+		fmt.Printf("BATCH add record for %v (%v, %v)\n", name, point.Day, point.Downloads)
+
+		placeholders = append(
+			placeholders,
+			fmt.Sprintf(
+				// NOTE: ($1, $2, $3, $4, ...)
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				k*8+1, k*8+2, k*8+3, k*8+4, k*8+5, k*8+6, k*8+7, k*8+8,
+			),
+		)
+
+		// Append the actual values to the args slice
+		args = append(args,
+			name,            // $1: name
+			point.Downloads, // $2: count
+			date,            // $3: date
+			requestTime,     // $4: last_updated_at
+			year,            // $5: date_year
+			month,           // $6: date_month
+			day,             // $7: date_day
+			dayOfWeek,       // $8: date_day_of_week
+		)
+	}
+
+	return placeholders, args
+}
+
 func insertRecords(db *sql.DB, batchSize int, pkg npm.SinglePackageResponse, requestTime time.Time) error {
 	fmt.Printf("Inserting records for %v\n", pkg.Package)
 
 	for i := 0; i < len(pkg.Downloads); i += batchSize {
-		var placeholders []string
-		var args []interface{}
-
 		j := min(i+batchSize, len(pkg.Downloads))
+		batch := pkg.Downloads[i:j]
 
-		for k, point := range pkg.Downloads[i:j] {
-			date, err := time.Parse(DateFormat, point.Day)
-			if err != nil {
-				return fmt.Errorf("Error parsing date: %v", err)
-			}
-			year := date.Year()
-			month := int(date.Month())
-			day := date.Day()
-			dayOfWeek := int(date.Weekday())
-
-			fmt.Printf("BATCH add record for %v (%v, %v)\n", pkg.Package, point.Day, point.Downloads)
-
-			placeholders = append(
-				placeholders,
-				fmt.Sprintf(
-					// NOTE: ($1, $2, $3, $4, ...)
-					"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-					k*8+1, k*8+2, k*8+3, k*8+4, k*8+5, k*8+6, k*8+7, k*8+8,
-				),
-			)
-
-			// Append the actual values to the args slice
-			args = append(args,
-				pkg.Package,     // $1: name
-				point.Downloads, // $2: count
-				date,            // $3: date
-				requestTime,     // $4: last_updated_at
-				year,            // $5: date_year
-				month,           // $6: date_month
-				day,             // $7: date_day
-				dayOfWeek,       // $8: date_day_of_week
-			)
-		}
+		placeholders, args := createBatchArgs(requestTime, pkg.Package, batch)
 
 		query := fmt.Sprintf(
 			DownloadsUpsertTemplate,
