@@ -38,6 +38,17 @@ const (
 	);
 	`
 
+	DownloadsUpsertTemplate = `INSERT INTO downloads (
+		name, count, date, last_updated_at,
+		date_year, date_month, date_day, date_day_of_week
+	) VALUES %s
+	ON CONFLICT(name, date_year, date_month, date_day)
+	DO UPDATE SET
+		count=excluded.count,
+		last_updated_at=excluded.last_updated_at
+	WHERE
+		excluded.count > downloads.count;`
+	ScopedPackagePrefix              = "@"
 	DateFormat                       = "2006-01-02"
 	NPM_DOWNLOADS_API                = "https://api.npmjs.org"
 	NPM_DOWNLOADS_API_RANGE_ENDPOINT = "%s/downloads/range/%s/%s"
@@ -159,7 +170,8 @@ func main() {
 	errors := make(chan error)
 
 	requestTime := time.Now()
-	fetch(&wg, results, errors, period, packages)
+	batches := packageDownloadBatches(packages)
+	fetch(&wg, results, errors, period, batches)
 
 	failures := 0
 
@@ -195,30 +207,13 @@ func main() {
 func insertRecords(db *sql.DB, batchSize int, pkg SinglePackageResponse, requestTime time.Time) error {
 	fmt.Printf("Inserting records for %v\n", pkg.Package)
 
-	// SQL query for batch inserts
-	insertQuery := `INSERT INTO downloads (
-		name, count, date, last_updated_at,
-		date_year, date_month, date_day, date_day_of_week
-	) VALUES %s
-	ON CONFLICT(name, date_year, date_month, date_day)
-	DO UPDATE SET
-		count=excluded.count,
-		last_updated_at=excluded.last_updated_at
-	WHERE
-		excluded.count > downloads.count;`
-
 	for i := 0; i < len(pkg.Downloads); i += batchSize {
-		// Create a slice to hold value placeholders and arguments
 		var placeholders []string
 		var args []interface{}
 
-		j := i + batchSize
-		if j > len(pkg.Downloads) {
-			j = len(pkg.Downloads)
-		}
+		j := min(i+batchSize, len(pkg.Downloads))
 
 		for k, point := range pkg.Downloads[i:j] {
-			// Extract components of the requestTime (e.g., year, month, day)
 			date, err := time.Parse(DateFormat, point.Day)
 			if err != nil {
 				return fmt.Errorf("Error parsing date: %v", err)
@@ -230,10 +225,10 @@ func insertRecords(db *sql.DB, batchSize int, pkg SinglePackageResponse, request
 
 			fmt.Printf("BATCH add record for %v (%v, %v)\n", pkg.Package, point.Day, point.Downloads)
 
-			// Append placeholders like ($1, $2, $3, $4, ...)
 			placeholders = append(
 				placeholders,
 				fmt.Sprintf(
+					// NOTE: ($1, $2, $3, $4, ...)
 					"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 					k*8+1, k*8+2, k*8+3, k*8+4, k*8+5, k*8+6, k*8+7, k*8+8,
 				),
@@ -252,13 +247,14 @@ func insertRecords(db *sql.DB, batchSize int, pkg SinglePackageResponse, request
 			)
 		}
 
-		// Join the placeholders to create the final query
-		finalQuery := fmt.Sprintf(insertQuery, strings.Join(placeholders, ","))
+		query := fmt.Sprintf(
+			DownloadsUpsertTemplate,
+			strings.Join(placeholders, ","),
+		)
 
-		fmt.Printf("BATCH execute (%v)\n", len(placeholders))
+		fmt.Printf("BATCH execute (%v)\n", j-i)
 
-		// Execute the batch insert
-		_, err := db.Exec(finalQuery, args...)
+		_, err := db.Exec(query, args...)
 		if err != nil {
 			return fmt.Errorf("error executing batch insert query: %v", err)
 		}
@@ -268,49 +264,70 @@ func insertRecords(db *sql.DB, batchSize int, pkg SinglePackageResponse, request
 	return nil
 }
 
-func fetch(wg *sync.WaitGroup, resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, period string, packageNames []string) {
+func isScopedPackageName(name string) bool {
+	return strings.HasPrefix(name, ScopedPackagePrefix)
+}
 
-	// Separate scoped and non-scoped packages
+func packageDownloadBatches(packageNames []string) [][]string {
+	// NOTE: Partition between scoped and non-scoped packages.
 	var scopedPackages []string
 	var nonScopedPackages []string
 
 	for _, pkg := range packageNames {
-		if strings.HasPrefix(pkg, "@") {
+		if isScopedPackageName(pkg) {
 			scopedPackages = append(scopedPackages, pkg)
 		} else {
 			nonScopedPackages = append(nonScopedPackages, pkg)
 		}
 	}
 
-	// Group non-scoped packages into chunks of 128
-	nonScopedChunks := arrays.Chunk(nonScopedPackages, 128)
+	// NOTE: Group non-scoped packages into batches of 128.
+	nonScopedBatches := arrays.Chunk(nonScopedPackages, 128)
 
-	allChunks := nonScopedChunks
+	// NOTE: Return all batches.
+	batches := nonScopedBatches
 	for _, pkg := range scopedPackages {
-		allChunks = append(allChunks, []string{pkg})
+		scopedBatch := []string{pkg}
+		batches = append(batches, scopedBatch)
 	}
 
-	for _, chunk := range allChunks {
-		wg.Add(1)
-		namesJoined := strings.Join(chunk, ",")
-		url := fmt.Sprintf(NPM_DOWNLOADS_API_RANGE_ENDPOINT, NPM_DOWNLOADS_API, period, namesJoined)
-		responseType := SingleResponse
-		if len(chunk) >= 2 {
-			responseType = MultiResponse
-		}
-		go fetchJSON(
-			wg,
-			resultsChan,
-			errorsChan,
-			url,
-			responseType,
-		)
+	return batches
+}
+
+func fetchBatch(wg *sync.WaitGroup, resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, period string, batch []string) {
+	wg.Add(1)
+
+	namesJoined := strings.Join(batch, ",")
+
+	url := fmt.Sprintf(
+		NPM_DOWNLOADS_API_RANGE_ENDPOINT,
+		NPM_DOWNLOADS_API,
+		period,
+		namesJoined,
+	)
+
+	responseType := SingleResponse
+	if len(batch) >= 2 {
+		responseType = MultiResponse
 	}
 
-	// Wait for all goroutines to finish and close channels
+	go fetchJSON(
+		wg,
+		resultsChan,
+		errorsChan,
+		url,
+		responseType,
+	)
+}
+
+func fetch(wg *sync.WaitGroup, results chan<- SinglePackageResponse, errors chan<- error, period string, batches [][]string) {
+	for _, batch := range batches {
+		fetchBatch(wg, results, errors, period, batch)
+	}
+
 	go func() {
 		wg.Wait()
-		close(resultsChan)
-		close(errorsChan)
+		close(results)
+		close(errors)
 	}()
 }
