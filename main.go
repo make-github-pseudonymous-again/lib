@@ -60,42 +60,91 @@ func main() {
 
 	batch, period, packages := args()
 
-	var wg sync.WaitGroup
-	results := make(chan npm.SinglePackageResponse)
-	errors := make(chan error)
+	var fetchWaitGroup sync.WaitGroup
+	fetchResults := make(chan npm.SinglePackageResponse)
+	fetchErrors := make(chan error)
 
 	requestTime := time.Now()
 	batches := npm.PackageDownloadBatches(period, packages)
-	fetch(&wg, results, errors, batches)
+	scheduleFetches(&fetchWaitGroup, fetchResults, fetchErrors, batches)
+
+	var insertWaitGroup sync.WaitGroup
+	// NOTE: We only allow one insert at a time since there is no possible
+	// concurrency with sqlite3 and the pre-processing is quite ligth.
+	insertSemaphore := make(chan struct{}, 1)
+	insertErrors := make(chan error)
 
 	failures := 0
 
-	for {
-		select {
-		case result, ok := <-results:
-			if ok {
-				err := insertRecords(db, batch, result, requestTime)
-				if err != nil {
-					log.Fatalf("Error inserting record: %v\n", err)
+	var insertLoopWaitGroup sync.WaitGroup
+	insertLoopWaitGroup.Add(1)
+	go func() {
+		defer insertLoopWaitGroup.Done()
+		for {
+			select {
+			case result, ok := <-fetchResults:
+				if ok {
+					scheduleInserts(
+						&insertWaitGroup,
+						insertSemaphore,
+						insertErrors,
+						db,
+						batch,
+						result,
+						requestTime,
+					)
+				} else {
+					fetchResults = nil
 				}
-			} else {
-				results = nil
+			case err, ok := <-fetchErrors:
+				if ok {
+					log.Printf("Error occurred during fetch: %v\n", err)
+					failures += 1
+				} else {
+					fetchErrors = nil
+				}
 			}
-		case err, ok := <-errors:
-			if ok {
-				log.Printf("Error occurred during fetch: %v\n", err)
-				failures += 1
-			} else {
-				errors = nil
-			}
-		}
-		if results == nil && errors == nil {
-			break
-		}
-	}
 
+			if fetchResults == nil && fetchErrors == nil {
+				break
+			}
+		}
+	}()
+
+	var insertLoopErrorsWaitGroup sync.WaitGroup
+	insertLoopErrorsWaitGroup.Add(1)
+	go func() {
+		defer insertLoopErrorsWaitGroup.Done()
+		for {
+			select {
+			case err, ok := <-insertErrors:
+				if ok {
+					log.Printf("Error occurred during insert: %v\n", err)
+					failures += 1
+				} else {
+					insertErrors = nil
+				}
+			}
+
+			if insertErrors == nil {
+				break
+			}
+		}
+	}()
+
+	fmt.Println("WAIT fetch")
+	fetchWaitGroup.Wait()
+	close(fetchResults)
+	close(fetchErrors)
+	fmt.Println("WAIT insert loop")
+	insertLoopWaitGroup.Wait()
+	fmt.Println("WAIT insert")
+	insertWaitGroup.Wait()
+	close(insertSemaphore)
+	close(insertErrors)
+	fmt.Println("WAIT insert loop errors")
+	insertLoopErrorsWaitGroup.Wait()
 	fmt.Printf("Failures: %v\n", failures)
-
 	fmt.Println("DONE")
 }
 
@@ -140,41 +189,59 @@ func createBatchArgs(requestTime time.Time, name string, batch []npm.DailyDownlo
 	return placeholders, args
 }
 
-func insertRecords(db *sql.DB, batchSize int, pkg npm.SinglePackageResponse, requestTime time.Time) error {
-	fmt.Printf("Inserting records for %v\n", pkg.Package)
+func scheduleInserts(
+	wg *sync.WaitGroup,
+	semaphore chan struct{},
+	errors chan<- error,
+	db *sql.DB,
+	batchSize int,
+	pkg npm.SinglePackageResponse,
+	requestTime time.Time,
+) {
+	fmt.Printf("INSERT schedule %v\n", pkg.Package)
 
 	for i := 0; i < len(pkg.Downloads); i += batchSize {
 		j := min(i+batchSize, len(pkg.Downloads))
-		batch := pkg.Downloads[i:j]
 
-		placeholders, args := createBatchArgs(requestTime, pkg.Package, batch)
+		wg.Add(1)
+		go func(i int, j int) {
+			defer wg.Done()
+			semaphore <- struct{}{}        // NOTE: Acquire worker slot.
+			defer func() { <-semaphore }() // NOTE: Release worker slot.
 
-		query := fmt.Sprintf(
-			DownloadsUpsertTemplate,
-			strings.Join(placeholders, ","),
-		)
+			batch := pkg.Downloads[i:j]
 
-		fmt.Printf("BATCH execute (%v)\n", j-i)
+			placeholders, args := createBatchArgs(requestTime, pkg.Package, batch)
 
-		_, err := db.Exec(query, args...)
-		if err != nil {
-			return fmt.Errorf("error executing batch insert query: %v", err)
-		}
+			query := fmt.Sprintf(
+				DownloadsUpsertTemplate,
+				strings.Join(placeholders, ","),
+			)
+
+			fmt.Printf("BATCH execute (%v)\n", j-i)
+
+			_, err := db.Exec(query, args...)
+			if err != nil {
+				errors <- fmt.Errorf("error executing batch insert query: %v", err)
+			}
+		}(i, j)
 
 	}
-
-	return nil
 }
 
-func fetch(wg *sync.WaitGroup, results chan<- npm.SinglePackageResponse, errors chan<- error, batches []npm.Batch) {
+func scheduleFetches(
+	wg *sync.WaitGroup,
+	results chan<- npm.SinglePackageResponse,
+	errors chan<- error,
+	batches []npm.Batch,
+) {
 	for _, batch := range batches {
 		wg.Add(1)
-		go npm.FetchBatch(wg, results, errors, batch)
+		go npm.FetchBatch(
+			wg,
+			results,
+			errors,
+			batch,
+		)
 	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-		close(errors)
-	}()
 }
