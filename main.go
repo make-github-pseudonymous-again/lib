@@ -2,43 +2,21 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
-
 	"github.com/make-github-pseudonymous-again/npm-downloads/internals/arrays"
+	"github.com/make-github-pseudonymous-again/npm-downloads/internals/dependencies"
+	"github.com/make-github-pseudonymous-again/npm-downloads/internals/npm"
 )
 
 const (
-	StorageDriver = "sqlite3"
-	StoragePath   = "./storage.sqlite3"
-
-	DownloadsTable = `
-	CREATE TABLE IF NOT EXISTS downloads (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		name TEXT NOT NULL,
-		count INTEGER NOT NULL,
-		date DATETIME NOT NULL,
-    	last_updated_at DATETIME NOT NULL,
-
-		date_year INTEGER NOT NULL,
-		date_month INTEGER NOT NULL,
-		date_day INTEGER NOT NULL,
-		date_day_of_week INTEGER NOT NULL,
-
-		UNIQUE(name, date_year, date_month, date_day)
-	);
-	`
-
-	DownloadsUpsertTemplate = `INSERT INTO downloads (
+	DownloadsUpsertTemplate = `
+	INSERT INTO downloads (
 		name, count, date, last_updated_at,
 		date_year, date_month, date_day, date_day_of_week
 	) VALUES %s
@@ -47,11 +25,11 @@ const (
 		count=excluded.count,
 		last_updated_at=excluded.last_updated_at
 	WHERE
-		excluded.count > downloads.count;`
-	ScopedPackagePrefix              = "@"
-	DateFormat                       = "2006-01-02"
-	NPM_DOWNLOADS_API                = "https://api.npmjs.org"
-	NPM_DOWNLOADS_API_RANGE_ENDPOINT = "%s/downloads/range/%s/%s"
+		excluded.count > downloads.count;
+	`
+
+	ScopedPackagePrefix = "@"
+	DateFormat          = "2006-01-02"
 	// TODO: https://api.npmjs.org/versions/{url-encoded-/ package name}/last-week
 	// NOTE: https://github.com/npm/registry/blob/main/docs/download-counts.md#per-version-download-counts
 
@@ -67,87 +45,6 @@ const (
 	MultiResponse
 )
 
-// Struct for daily downloads
-type DailyDownload struct {
-	Downloads int    `json:"downloads"`
-	Day       string `json:"day"`
-}
-
-// Struct for a single-package response
-type SinglePackageResponse struct {
-	Start     string          `json:"start"`
-	End       string          `json:"end"`
-	Package   string          `json:"package"`
-	Downloads []DailyDownload `json:"downloads"`
-}
-
-// Struct for a multi-package response
-type MultiPackageResponse map[string]SinglePackageResponse
-
-func fetchJSON(
-	wg *sync.WaitGroup,
-	resultsChan chan<- SinglePackageResponse,
-	errorsChan chan<- error,
-	url string,
-	responseType int) {
-	defer wg.Done()
-
-	fmt.Printf("FETCH %s\n", url)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		errorsChan <- err
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		errorsChan <- err
-		return
-	}
-
-	// Parse based on the specified response type
-	if responseType == MultiResponse {
-		var multiResp MultiPackageResponse
-		if err := json.Unmarshal(body, &multiResp); err == nil {
-			// Send each single response to resultsChan
-			for _, singleResp := range multiResp {
-				resultsChan <- singleResp
-			}
-			return
-		}
-		errorsChan <- fmt.Errorf("failed to parse multi-package response: %s", body)
-	} else if responseType == SingleResponse {
-		var singleResp SinglePackageResponse
-		if err := json.Unmarshal(body, &singleResp); err == nil && singleResp.Package != "" {
-			resultsChan <- singleResp
-			return
-		}
-		errorsChan <- fmt.Errorf("failed to parse single-package response: %s", body)
-	}
-
-	// If the response type doesn't match any case, log an error
-	errorsChan <- fmt.Errorf("unknown response type: %d", responseType)
-}
-
-func storage() *sql.DB {
-	// Connect to SQLite database (or create it if it doesn't exist)
-	fmt.Println("Opening storage")
-	db, err := sql.Open(StorageDriver, StoragePath)
-	if err != nil {
-		log.Fatalf("Error opening storage: %v\n", err)
-	}
-
-	fmt.Println("Creating table")
-	_, err = db.Exec(DownloadsTable)
-	if err != nil {
-		log.Fatalf("Error creating table: %v\n", err)
-	}
-
-	return db
-}
-
 func args() (string, []string) {
 	var period string
 	flag.StringVar(&period, "period", LastDay, "Period to fetch")
@@ -160,13 +57,13 @@ func args() (string, []string) {
 
 func main() {
 
-	db := storage()
+	db := dependencies.Storage()
 	defer db.Close()
 
 	period, packages := args()
 
 	var wg sync.WaitGroup
-	results := make(chan SinglePackageResponse)
+	results := make(chan npm.SinglePackageResponse)
 	errors := make(chan error)
 
 	requestTime := time.Now()
@@ -204,7 +101,7 @@ func main() {
 	fmt.Println("DONE")
 }
 
-func insertRecords(db *sql.DB, batchSize int, pkg SinglePackageResponse, requestTime time.Time) error {
+func insertRecords(db *sql.DB, batchSize int, pkg npm.SinglePackageResponse, requestTime time.Time) error {
 	fmt.Printf("Inserting records for %v\n", pkg.Package)
 
 	for i := 0; i < len(pkg.Downloads); i += batchSize {
@@ -294,35 +191,10 @@ func packageDownloadBatches(packageNames []string) [][]string {
 	return batches
 }
 
-func fetchBatch(wg *sync.WaitGroup, resultsChan chan<- SinglePackageResponse, errorsChan chan<- error, period string, batch []string) {
-	wg.Add(1)
-
-	namesJoined := strings.Join(batch, ",")
-
-	url := fmt.Sprintf(
-		NPM_DOWNLOADS_API_RANGE_ENDPOINT,
-		NPM_DOWNLOADS_API,
-		period,
-		namesJoined,
-	)
-
-	responseType := SingleResponse
-	if len(batch) >= 2 {
-		responseType = MultiResponse
-	}
-
-	go fetchJSON(
-		wg,
-		resultsChan,
-		errorsChan,
-		url,
-		responseType,
-	)
-}
-
-func fetch(wg *sync.WaitGroup, results chan<- SinglePackageResponse, errors chan<- error, period string, batches [][]string) {
+func fetch(wg *sync.WaitGroup, results chan<- npm.SinglePackageResponse, errors chan<- error, period string, batches [][]string) {
 	for _, batch := range batches {
-		fetchBatch(wg, results, errors, period, batch)
+		wg.Add(1)
+		go npm.FetchBatch(wg, results, errors, period, batch)
 	}
 
 	go func() {
