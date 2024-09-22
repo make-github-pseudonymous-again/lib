@@ -77,7 +77,7 @@ func main() {
 	failures := 0
 
 	var insertLoopWaitGroup sync.WaitGroup
-	insertLoopWaitGroup.Add(1)
+	insertLoopWaitGroup.Add(2)
 	go func() {
 		defer insertLoopWaitGroup.Done()
 		for {
@@ -96,6 +96,18 @@ func main() {
 				} else {
 					fetchResults = nil
 				}
+			}
+
+			if fetchResults == nil {
+				break
+			}
+		}
+	}()
+
+	go func() {
+		defer insertLoopWaitGroup.Done()
+		for {
+			select {
 			case err, ok := <-fetchErrors:
 				if ok {
 					log.Printf("Error occurred during fetch: %v\n", err)
@@ -105,7 +117,7 @@ func main() {
 				}
 			}
 
-			if fetchResults == nil && fetchErrors == nil {
+			if fetchErrors == nil {
 				break
 			}
 		}
