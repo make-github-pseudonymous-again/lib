@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,35 +44,138 @@ const (
 	MultiResponse
 )
 
-func args() (int, string, []string) {
-	var period string
-	flag.StringVar(&period, "period", LastDay, "Period to fetch")
+type Values []string
+
+// String is an implementation of the flag.Value interface
+func (values *Values) String() string {
+	return fmt.Sprintf("%v", *values)
+}
+
+// Set is an implementation of the flag.Value interface
+func (values *Values) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
+type Args struct {
+	Batch       int
+	Queue       int
+	Period      string
+	Authors     []string
+	Scopes      []string
+	Maintainers []string
+	Keywords    []string
+	Packages    []string
+}
+
+func _args() Args {
+	var authors Values
+	var scopes Values
+	var maintainers Values
+	var keywords Values
+	period := flag.String("period", LastDay, "Period to fetch")
+	flag.Var(&authors, "author", "Author queries")
+	flag.Var(&scopes, "scope", "Scope queries")
+	flag.Var(&maintainers, "maintainer", "Maintainer queries")
+	flag.Var(&keywords, "keyword", "Keyword queries")
 	batch := flag.Int("batch", 100, "Batch size for DB inserts")
+	queue := flag.Int("queue", 2, "Queue size for API fetches")
 	flag.Parse()
-	fmt.Printf("Period: %v\n", period)
 	packages := flag.Args()
+	fmt.Printf("Batch: %v\n", *batch)
+	fmt.Printf("Queue: %v\n", *queue)
+	fmt.Printf("Period: %v\n", *period)
+	fmt.Printf("Authors: %v\n", authors)
+	fmt.Printf("Scopes: %v\n", scopes)
+	fmt.Printf("Maintainers: %v\n", maintainers)
+	fmt.Printf("Keywords: %v\n", keywords)
 	fmt.Printf("Packages: %v\n", packages)
-	return *batch, period, packages
+	return Args{
+		*batch,
+		*queue,
+		*period,
+		authors,
+		scopes,
+		maintainers,
+		keywords,
+		packages,
+	}
 }
 
 func main() {
 	db := dependencies.Storage()
 	defer db.Close()
 
-	batch, period, packages := args()
+	args := _args()
+
+	var searchWaitGroup sync.WaitGroup
+	searchQueue := make(chan struct{}, args.Queue)
+	searchResults := make(chan npm.SearchResponseObject)
+	searchErrors := make(chan error)
+
+	var queries []string
+	for _, author := range args.Authors {
+		query := fmt.Sprintf("author:%s", author)
+		queries = append(queries, query)
+	}
+	for _, maintainer := range args.Maintainers {
+		query := fmt.Sprintf("maintainer:%s", maintainer)
+		queries = append(queries, query)
+	}
+	for _, scope := range args.Scopes {
+		query := fmt.Sprintf("scope:%s", scope)
+		queries = append(queries, query)
+	}
+	for _, keyword := range args.Keywords {
+		query := fmt.Sprintf("keyword:%s", keyword)
+		queries = append(queries, query)
+	}
+	scheduleSearches(&searchWaitGroup, searchQueue, searchResults, searchErrors, queries)
+
+	var packages []string
+
+	go func() {
+		for {
+			select {
+			case result, ok := <-searchResults:
+				if ok {
+					log.Printf("Found: %v\n", result.Package.Name)
+					packages = append(packages, result.Package.Name)
+				} else {
+					searchResults = nil
+				}
+			}
+
+			if searchResults == nil {
+				break
+			}
+		}
+	}()
+
+	fmt.Println("WAIT search")
+	searchWaitGroup.Wait()
+	fmt.Println("DONE search")
+
+	for _, pkg := range args.Packages {
+		packages = append(packages, pkg)
+	}
+
+	slices.Sort(packages)
+	slices.Compact(packages)
 
 	var fetchWaitGroup sync.WaitGroup
+	fetchQueue := make(chan struct{}, args.Queue)
 	fetchResults := make(chan npm.SinglePackageResponse)
 	fetchErrors := make(chan error)
 
 	requestTime := time.Now()
-	batches := npm.PackageDownloadBatches(period, packages)
-	scheduleFetches(&fetchWaitGroup, fetchResults, fetchErrors, batches)
+	batches := npm.PackageDownloadBatches(args.Period, packages)
+	scheduleFetches(&fetchWaitGroup, fetchQueue, fetchResults, fetchErrors, batches)
 
 	var insertWaitGroup sync.WaitGroup
 	// NOTE: We only allow one insert at a time since there is no possible
-	// concurrency with sqlite3 and the pre-processing is quite ligth.
-	insertSemaphore := make(chan struct{}, 1)
+	// concurrency with sqlite3 and the pre-processing is quite light.
+	insertQueue := make(chan struct{}, 1)
 	insertErrors := make(chan error)
 
 	failures := 0
@@ -86,10 +190,10 @@ func main() {
 				if ok {
 					scheduleInserts(
 						&insertWaitGroup,
-						insertSemaphore,
+						insertQueue,
 						insertErrors,
 						db,
-						batch,
+						args.Batch,
 						result,
 						requestTime,
 					)
@@ -152,7 +256,7 @@ func main() {
 	insertLoopWaitGroup.Wait()
 	fmt.Println("WAIT insert")
 	insertWaitGroup.Wait()
-	close(insertSemaphore)
+	close(insertQueue)
 	close(insertErrors)
 	fmt.Println("WAIT insert loop errors")
 	insertLoopErrorsWaitGroup.Wait()
@@ -203,7 +307,7 @@ func createBatchArgs(requestTime time.Time, name string, batch []npm.DailyDownlo
 
 func scheduleInserts(
 	wg *sync.WaitGroup,
-	semaphore chan struct{},
+	queue chan struct{},
 	errors chan<- error,
 	db *sql.DB,
 	batchSize int,
@@ -218,8 +322,8 @@ func scheduleInserts(
 		wg.Add(1)
 		go func(i int, j int) {
 			defer wg.Done()
-			semaphore <- struct{}{}        // NOTE: Acquire worker slot.
-			defer func() { <-semaphore }() // NOTE: Release worker slot.
+			queue <- struct{}{}        // NOTE: Acquire worker slot.
+			defer func() { <-queue }() // NOTE: Release worker slot.
 
 			batch := pkg.Downloads[i:j]
 
@@ -243,17 +347,49 @@ func scheduleInserts(
 
 func scheduleFetches(
 	wg *sync.WaitGroup,
+	queue chan struct{},
 	results chan<- npm.SinglePackageResponse,
 	errors chan<- error,
 	batches []npm.Batch,
 ) {
 	for _, batch := range batches {
 		wg.Add(1)
-		go npm.FetchBatch(
-			wg,
-			results,
-			errors,
-			batch,
-		)
+		go func(batch npm.Batch) {
+			defer wg.Done()
+			queue <- struct{}{}        // NOTE: Acquire worker slot.
+			defer func() { <-queue }() // NOTE: Release worker slot.
+
+			npm.FetchBatch(
+				results,
+				errors,
+				batch,
+			)
+		}(batch)
+	}
+}
+
+func scheduleSearches(
+	wg *sync.WaitGroup,
+	queue chan struct{},
+	results chan<- npm.SearchResponseObject,
+	errors chan<- error,
+	queries []string,
+) {
+	for _, query := range queries {
+		wg.Add(1)
+		go func(query string) {
+			defer wg.Done()
+			queue <- struct{}{}        // NOTE: Acquire worker slot.
+			defer func() { <-queue }() // NOTE: Release worker slot.
+
+			npm.Search(
+				results,
+				errors,
+				query,
+				0,
+				1,
+				0,
+			)
+		}(query)
 	}
 }

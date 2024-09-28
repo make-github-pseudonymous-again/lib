@@ -12,6 +12,12 @@ const (
 	StorageDriver = "sqlite3"
 	StoragePath   = "./storage.sqlite3"
 
+	// TODO: datetime DATETIME
+	// TODO: date DATE
+	// TODO: url TEXT
+	// TODO: system TEXT
+	// TODO: version TEXT
+
 	DownloadsTable = `
 	CREATE TABLE IF NOT EXISTS downloads (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,

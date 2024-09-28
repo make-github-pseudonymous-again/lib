@@ -2,11 +2,12 @@ package npm
 
 import (
 	"fmt"
+	"log"
+	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/make-github-pseudonymous-again/npm-downloads/internals/arrays"
-	"github.com/make-github-pseudonymous-again/npm-downloads/internals/http"
+	_http "github.com/make-github-pseudonymous-again/npm-downloads/internals/http"
 	"github.com/make-github-pseudonymous-again/npm-downloads/internals/npm/names"
 )
 
@@ -16,13 +17,11 @@ const (
 	MaxBatchSize                     = 128
 )
 
-// Struct for daily downloads
 type DailyDownload struct {
 	Downloads int    `json:"downloads"`
 	Day       string `json:"day"`
 }
 
-// Struct for a single-package response
 type SinglePackageResponse struct {
 	Error     string          `json:"error"`
 	Start     string          `json:"start"`
@@ -31,7 +30,6 @@ type SinglePackageResponse struct {
 	Downloads []DailyDownload `json:"downloads"`
 }
 
-// Struct for a multi-package response
 type MultiPackageResponse map[string]SinglePackageResponse
 
 type Batch struct {
@@ -39,7 +37,7 @@ type Batch struct {
 	Packages []string
 }
 
-func url(batch Batch) string {
+func _batch_url(batch Batch) string {
 	namesJoined := strings.Join(batch.Packages, ",")
 	return fmt.Sprintf(
 		NPM_DOWNLOADS_API_RANGE_ENDPOINT,
@@ -49,9 +47,15 @@ func url(batch Batch) string {
 	)
 }
 
-func FetchBatch(wg *sync.WaitGroup, results chan<- SinglePackageResponse, errors chan<- error, batch Batch) {
-	defer wg.Done()
+func _batch_req(batch Batch) *http.Request {
+	req, err := http.NewRequest("GET", _batch_url(batch), nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return req
+}
 
+func FetchBatch(results chan<- SinglePackageResponse, errors chan<- error, batch Batch) {
 	if len(batch.Packages) == 1 {
 		FetchBatchSingle(
 			results,
@@ -75,7 +79,7 @@ func FetchBatchSingle(results chan<- SinglePackageResponse, errors chan<- error,
 	}
 
 	var response SinglePackageResponse
-	err := http.FetchJSON(url(batch), &response)
+	err := _http.FetchJSON(_batch_req(batch), &response)
 
 	if err != nil {
 		errors <- err
@@ -95,7 +99,7 @@ func FetchBatchMany(results chan<- SinglePackageResponse, errors chan<- error, b
 	}
 
 	var responses MultiPackageResponse
-	err := http.FetchJSON(url(batch), &responses)
+	err := _http.FetchJSON(_batch_req(batch), &responses)
 
 	if err != nil {
 		errors <- err
