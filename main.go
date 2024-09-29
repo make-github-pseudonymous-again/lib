@@ -145,7 +145,6 @@ func main() {
 			select {
 			case result, ok := <-searchResults:
 				if ok {
-					log.Printf("Found: %v\n", result.Package.Name)
 					packages = append(packages, result.Package.Name)
 				} else {
 					searchResults = nil
@@ -191,7 +190,7 @@ func main() {
 	}
 
 	slices.Sort(packages)
-	slices.Compact(packages)
+	packages = slices.Compact(packages)
 
 	var fetchWaitGroup sync.WaitGroup
 	fetchQueue := make(chan struct{}, args.Queue)

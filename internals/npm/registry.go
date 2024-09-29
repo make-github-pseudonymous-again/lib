@@ -111,17 +111,14 @@ func Search(
 		err := _http.FetchJSON(req, &response)
 		if err != nil {
 			errors <- err
-			log.Printf("%v\n", err)
 			return
 		}
 
 		for _, object := range response.Objects {
-			log.Printf("%v\n", object.Package.Name)
 			results <- object
 		}
 
 		if len(response.Objects) < step {
-			log.Printf("BREAK\n")
 			break
 		}
 
