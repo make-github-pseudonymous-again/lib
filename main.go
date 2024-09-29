@@ -106,6 +106,8 @@ func main() {
 	db := dependencies.Storage()
 	defer db.Close()
 
+	failures := 0
+
 	args := _args()
 
 	var searchWaitGroup sync.WaitGroup
@@ -134,7 +136,11 @@ func main() {
 
 	var packages []string
 
+	var searchLoopWaitGroup sync.WaitGroup
+
+	searchLoopWaitGroup.Add(2)
 	go func() {
+		defer searchLoopWaitGroup.Done()
 		for {
 			select {
 			case result, ok := <-searchResults:
@@ -152,8 +158,32 @@ func main() {
 		}
 	}()
 
+	go func() {
+		defer searchLoopWaitGroup.Done()
+		for {
+			select {
+			case err, ok := <-searchErrors:
+				if ok {
+					log.Printf("Error occurred during search: %v\n", err)
+					failures += 1
+				} else {
+					searchErrors = nil
+				}
+			}
+
+			if searchErrors == nil {
+				break
+			}
+		}
+	}()
+
 	fmt.Println("WAIT search")
 	searchWaitGroup.Wait()
+	close(searchQueue)
+	close(searchResults)
+	close(searchErrors)
+	fmt.Println("WAIT search loop")
+	searchLoopWaitGroup.Wait()
 	fmt.Println("DONE search")
 
 	for _, pkg := range args.Packages {
@@ -177,8 +207,6 @@ func main() {
 	// concurrency with sqlite3 and the pre-processing is quite light.
 	insertQueue := make(chan struct{}, 1)
 	insertErrors := make(chan error)
-
-	failures := 0
 
 	var insertLoopWaitGroup sync.WaitGroup
 	insertLoopWaitGroup.Add(2)
@@ -250,6 +278,7 @@ func main() {
 
 	fmt.Println("WAIT fetch")
 	fetchWaitGroup.Wait()
+	close(fetchQueue)
 	close(fetchResults)
 	close(fetchErrors)
 	fmt.Println("WAIT insert loop")

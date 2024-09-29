@@ -29,7 +29,8 @@ type Package struct {
 }
 
 type Flags struct {
-	Insecure int `json:"insecure"`
+	Insecure int  `json:"insecure"`
+	Unstable bool `json:"unstable"`
 }
 
 type ScoreDetail struct {
